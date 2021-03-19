@@ -46,7 +46,7 @@ class CommunityAuthenticator constructor(
         return rxSingle(coroutineContext) {
             if (loginEvent is LoginEvent.CommunityLoginEvent) {
                 try {
-                    tokenService.getToken(identity = loginEvent.identity, passcode = loginEvent.passcode)
+                    tokenService.getToken(identity = loginEvent.identity, passcode = loginEvent.passcode,roomName = "a")
 
                     sharedPreferences.edit { putString(DISPLAY_NAME, loginEvent.identity) }
                     securePreferences.putSecureString(PASSCODE, loginEvent.passcode)

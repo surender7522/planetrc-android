@@ -22,6 +22,7 @@ import android.animation.ValueAnimator
 import android.annotation.TargetApi
 import android.app.Activity
 import android.app.AlertDialog
+import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.DialogInterface
 import android.content.Intent
@@ -32,11 +33,15 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Message
 import android.text.TextUtils
+import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.widget.doOnTextChanged
 import androidx.lifecycle.ViewModelProvider
@@ -44,9 +49,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.android.material.snackbar.BaseTransientBottomBar
 import com.google.android.material.snackbar.Snackbar
 import com.twilio.audioswitch.AudioDevice
-import com.twilio.audioswitch.AudioDevice.BluetoothHeadset
-import com.twilio.audioswitch.AudioDevice.Speakerphone
-import com.twilio.audioswitch.AudioDevice.WiredHeadset
+import com.twilio.audioswitch.AudioDevice.*
 import com.twilio.audioswitch.AudioSwitch
 import com.twilio.video.app.R
 import com.twilio.video.app.adapter.StatsListAdapter
@@ -59,36 +62,20 @@ import com.twilio.video.app.participant.ParticipantViewState
 import com.twilio.video.app.sdk.RoomManager
 import com.twilio.video.app.ui.room.RoomViewConfiguration.Connecting
 import com.twilio.video.app.ui.room.RoomViewConfiguration.Lobby
-import com.twilio.video.app.ui.room.RoomViewEffect.Connected
-import com.twilio.video.app.ui.room.RoomViewEffect.Disconnected
-import com.twilio.video.app.ui.room.RoomViewEffect.PermissionsDenied
-import com.twilio.video.app.ui.room.RoomViewEffect.ShowConnectFailureDialog
-import com.twilio.video.app.ui.room.RoomViewEffect.ShowMaxParticipantFailureDialog
-import com.twilio.video.app.ui.room.RoomViewEffect.ShowTokenErrorDialog
-import com.twilio.video.app.ui.room.RoomViewEvent.ActivateAudioDevice
-import com.twilio.video.app.ui.room.RoomViewEvent.Connect
-import com.twilio.video.app.ui.room.RoomViewEvent.DeactivateAudioDevice
-import com.twilio.video.app.ui.room.RoomViewEvent.DisableLocalAudio
-import com.twilio.video.app.ui.room.RoomViewEvent.DisableLocalVideo
-import com.twilio.video.app.ui.room.RoomViewEvent.Disconnect
-import com.twilio.video.app.ui.room.RoomViewEvent.EnableLocalAudio
-import com.twilio.video.app.ui.room.RoomViewEvent.EnableLocalVideo
-import com.twilio.video.app.ui.room.RoomViewEvent.OnPause
-import com.twilio.video.app.ui.room.RoomViewEvent.OnResume
-import com.twilio.video.app.ui.room.RoomViewEvent.SelectAudioDevice
-import com.twilio.video.app.ui.room.RoomViewEvent.StartScreenCapture
-import com.twilio.video.app.ui.room.RoomViewEvent.StopScreenCapture
-import com.twilio.video.app.ui.room.RoomViewEvent.SwitchCamera
-import com.twilio.video.app.ui.room.RoomViewEvent.ToggleLocalAudio
-import com.twilio.video.app.ui.room.RoomViewEvent.ToggleLocalVideo
+import com.twilio.video.app.ui.room.RoomViewEffect.*
+import com.twilio.video.app.ui.room.RoomViewEvent.*
 import com.twilio.video.app.ui.room.RoomViewModel.RoomViewModelFactory
 import com.twilio.video.app.ui.settings.SettingsActivity
 import com.twilio.video.app.util.InputUtils
 import com.twilio.video.app.util.PermissionUtil
 import io.uniflow.androidx.flow.onEvents
 import io.uniflow.androidx.flow.onStates
-import javax.inject.Inject
+import okhttp3.*
+import okio.ByteString
+import org.json.JSONException
+import org.json.JSONObject
 import timber.log.Timber
+import javax.inject.Inject
 
 class RoomActivity : BaseActivity() {
     private lateinit var binding: RoomActivityBinding
@@ -120,7 +107,8 @@ class RoomActivity : BaseActivity() {
     private lateinit var participantAdapter: ParticipantAdapter
     private lateinit var roomViewModel: RoomViewModel
     private lateinit var recordingAnimation: ObjectAnimator
-
+    private var bt: Bluetooth? = null
+    private var client: OkHttpClient? = null
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = RoomActivityBinding.inflate(layoutInflater)
@@ -128,10 +116,18 @@ class RoomActivity : BaseActivity() {
         binding.joinRoom.roomName.doOnTextChanged { text: CharSequence?, _, _, _ ->
             roomNameTextChanged(text)
         }
+        bt = Bluetooth(this, mHandler)
+        connectService()
+        client = OkHttpClient()
         binding.joinRoom.connect.setOnClickListener { connectButtonClick() }
         binding.disconnect.setOnClickListener { disconnectButtonClick() }
         binding.localVideo.setOnClickListener { toggleLocalVideo() }
         binding.localAudio.setOnClickListener { toggleLocalAudio() }
+        binding.restart.setOnClickListener{ connectService()}
+        binding.fulloff.setOnClickListener{output("LED Off"); bt!!.sendMessage("OFF")}
+        binding.fullon.setOnClickListener {output("LED On"); bt!!.sendMessage("ON")}
+        binding.soc.setOnClickListener{output("Connecting to Fastapi"); start()}
+
         val factory = RoomViewModelFactory(roomManager, audioSwitch, PermissionUtil(this))
         roomViewModel = ViewModelProvider(this, factory).get(RoomViewModel::class.java)
 
@@ -152,7 +148,91 @@ class RoomActivity : BaseActivity() {
         // Setup participant controller
         primaryParticipantController = PrimaryParticipantController(binding.room.primaryVideo)
 
+
         setupRecordingAnimation()
+    }
+
+    fun connectService() {
+        try {
+//            status.setText("Connecting...")
+            output("Connecting... ")
+            val bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
+            if (bluetoothAdapter.isEnabled) {
+                bt?.start()
+                bt?.connectDevice("HC-06")
+                Log.d("TAG", "Btservice started - listening")
+//                status.setText("Connected")
+                output("Connected")
+            } else {
+                Log.w("TAG", "Btservice started - bluetooth is not enabled")
+//                status.setText("Bluetooth Not enabled")
+                output("Bluetooth Not enabled")
+            }
+        } catch (e: Exception) {
+            Log.e("TAG", "Unable to start bt ", e)
+//            status.setText("Unable to connect $e")
+            output("Unable to connect $e")
+        }
+    }
+
+
+    private val mHandler: Handler = object : Handler() {
+        override fun handleMessage(msg: Message) {
+            when (msg.what) {
+                Bluetooth.MESSAGE_STATE_CHANGE -> Log.d("TAG", "MESSAGE_STATE_CHANGE: " + msg.arg1)
+                Bluetooth.MESSAGE_WRITE -> Log.d("TAG", "MESSAGE_WRITE ")
+                Bluetooth.MESSAGE_READ -> Log.d("TAG", "MESSAGE_READ ")
+                Bluetooth.MESSAGE_DEVICE_NAME -> Log.d("TAG", "MESSAGE_DEVICE_NAME $msg")
+                Bluetooth.MESSAGE_TOAST -> Log.d("TAG", "MESSAGE_TOAST $msg")
+            }
+        }
+    }
+
+    inner class EchoWebSocketListener : WebSocketListener() {
+        val NORMAL_CLOSURE_STATUS = 1000
+        override fun onOpen(webSocket: WebSocket, response: Response) {
+            webSocket.send("Hello, it's SSaurel !")
+            webSocket.send("What's up ?")
+            //webSocket.close(NORMAL_CLOSURE_STATUS, "Goodbye !");
+        }
+
+        override fun onMessage(webSocket: WebSocket, text: String) {
+//            output("Receiving : " + text);
+            try {
+                val data1 = JSONObject(text).getJSONObject("data") as JSONObject
+                val msg = data1.getString("msg")
+//                output(msg)
+                bt!!.sendMessage(msg)
+            } catch (e: JSONException) {
+                e.printStackTrace()
+            }
+        }
+
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            output("Receiving bytes : " + bytes.hex())
+        }
+
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            webSocket.close(NORMAL_CLOSURE_STATUS, null)
+            output("Closing : $code / $reason")
+        }
+
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            output("Error : " + t.message)
+        }
+
+    }
+
+    private fun start() {
+        val request = Request.Builder().url("ws://192.168.196.142:8000/ws").build()
+        val listener = EchoWebSocketListener()
+        val ws: WebSocket = client!!.newWebSocket(request, listener)
+        //client.dispatcher().executorService().shutdown();
+    }
+
+
+    private fun output(txt: String) {
+        runOnUiThread { Toast.makeText(applicationContext, txt, Toast.LENGTH_SHORT).show() }
     }
 
     override fun onDestroy() {
